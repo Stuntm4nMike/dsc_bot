@@ -125,6 +125,7 @@ async def show_cmds(message):
 
 @client.event
 async def on_ready():
+    print(f"Loading opus")
     discord.opus.load_opus(ctypes.util.find_library("opus"))
     print(f"Opus loaded:{discord.opus.is_loaded()}")
     print(f'We have logged in as {client.user}')
@@ -141,6 +142,10 @@ async def on_message(message):
 
 responses = {"!hello" : say_hello, "!help" : show_cmds, "!play" : add_to_queue, "!queue" : show_queue, "!skip" : skip_track}
 
-loop.create_task(client.start("MTIzODk1NTE5NDUyMDE3ODc0OA.GNuSnf.riJeC_u70Szei1B7-JHt_Ws5-yRa09TwkuW1Bg"))
+with open("./token", "r") as t_f:
+    token = t_f.read()
+    loop.create_task(client.start(token))
+
+print(f"Loading opus")
 loop.run_forever()
 loop.close()

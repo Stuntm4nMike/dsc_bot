@@ -1,4 +1,4 @@
-discord
+discord.py[voice]
 asyncio
 yt_dlp
 pathlib
