@@ -26,9 +26,9 @@ playback_timestamp = time.time()
 playback_offset = 0.0
 
 yt_base_url = re.compile("https:\/\/www.you")
+download_inprogress = False
 
 cache_limit = 5
-cache_height = 0
 f_id = 0
 
 commands = {}
@@ -36,6 +36,7 @@ command_prefix = "!"
 
 channel_change = False
 followed_user = None
+
 
 def cmd(func):
     global commands
@@ -57,6 +58,14 @@ def require_vc(func):
     return wrapper
 
 
+async def wait_for_download(q_idx):
+    global audio_queue
+
+    while not audio_queue[q_idx]["downloaded"]:
+        await asyncio.sleep(0.5)
+        print("Waiting for download")
+
+
 def int_to_padded_str(num, padding=1):
     padded_num = str(num)
     padded_num = "0"*(padding+1 - len(padded_num)) + padded_num
@@ -74,27 +83,59 @@ def fstamp_to_str(ts):
     return f"{hours}:{minutes}:{seconds}.{hun_sec}"
 
 
+def get_video_url(url):
+    global yt_base_url
+
+    ctx = {
+        "http_chunk_size" : 10485760
+    }
+
+    with YoutubeDL(ctx) as yt_dl:
+        if yt_base_url.match(url) != None:
+            print(f"Download from url")
+            track_info = yt_dl.extract_info(url.split("&")[0], download=False)
+        else:
+            print("from serch term")
+            track_info = yt_dl.extract_info(f"ytsearch:{url}", download=False)['entries'][0]
+
+    return [s for s in track_info["formats"] if s["format_id"] == "251"][0]["url"]
+
+
+async def add_to_queue(s_t):
+    global audio_queue
+    if len(audio_queue) == 0:
+        video_url = get_video_url(s_t)
+    else:
+        with concurrent.futures.ProcessPoolExecutor() as exc:
+            video_url = await loop.run_in_executor(exc, get_video_url, s_t)
+
+    audio_queue.append({"search_term" : s_t, "video_url" : video_url, "f_index" : None, "downloaded" : False, "downloading" : False})
+
+
 async def handle_cache():
-    global cache_height
     global cache_limit
+    global download_inprogress
     global f_id
 
-    if(cache_height < cache_limit):
-        uncached = [q_e for q_e in audio_queue if q_e["f_index"] == None]
-        if len(uncached) > 0:
-            for i in range (0, cache_limit - cache_height):
-                if i >= len(uncached):
-                    return
+    for q_i in range(0, cache_limit):
+        if q_i >= len(audio_queue):
+            return
 
-                queue_entry = uncached[i]
+        q_e = audio_queue[q_i]
 
+        if not q_e["downloaded"] and not q_e["downloading"]:
+            q_e["downloading"] = True
+            while download_inprogress:
+                await asyncio.sleep(1)
+            with concurrent.futures.ProcessPoolExecutor() as exc:
+                download_inprogress = True
                 f_index = f_id % cache_limit
-                queue_entry["f_index"] = f_index
+                q_e["f_index"] = f_index
+                fut = await loop.run_in_executor(exc, download_audio, q_e["video_url"], f_index)
+                q_e["downloaded"] = fut
                 f_id += 1
-                cache_height += 1
+                download_inprogress = False
 
-                with concurrent.futures.ProcessPoolExecutor() as exc:
-                    await loop.run_in_executor(exc, download_audio, queue_entry["search_term"], f_index)
 
 @require_vc
 async def change_voicechannel(channel):
@@ -115,13 +156,11 @@ async def change_voicechannel(channel):
 
 def play_next(err):
     global playback_inprogress
-    global cache_height
     global channel_change
     global loop
 
     if not channel_change:
         playback_inprogress = False
-        cache_height -= 1
         audio_queue.pop(0)
         if len(audio_queue) > 0:
             asyncio.run_coroutine_threadsafe(handle_cache(), loop)
@@ -137,6 +176,8 @@ async def play_yt(timestamp=0.0):
     global audio_queue
     global yt_base_url
 
+    await wait_for_download(0)
+
     audio_source = await discord.FFmpegOpusAudio.from_probe(f"tmp_{audio_queue[0]['f_index']}.webm", before_options=f"-ss {fstamp_to_str(timestamp)}")
     playback_timestamp = time.time()
     playback_offset = timestamp
@@ -146,24 +187,20 @@ async def play_yt(timestamp=0.0):
     voice_client.play(audio_source, after=play_next)
 
     
-def download_audio(search_term, f_index):
-    global yt_base_url
+def download_audio(v_url, f_index, rt=0):
     ctx = {
         "outtmpl" : f"tmp_{f_index}.webm",
         "overwrites" : True,
-        "http_chunk_size" : 10000000
+        "http_chunk_size" : 10485760
     }
-    with YoutubeDL(ctx) as yt_dl:
-        if yt_base_url.match(search_term) != None:
-            print(f"Download from url")
-            track_info = yt_dl.extract_info(search_term.split("&")[0], download=False)
-        else:
-            print("from serch term")
-            track_info = yt_dl.extract_info(f"ytsearch:{search_term}", download=False)['entries'][0]
-
-        src = [s for s in track_info["formats"] if s["format_id"] == "251"][0]["url"]
-        yt_dl.download([src])
-
+    try:
+        with YoutubeDL(ctx) as yt_dl:
+            yt_dl.download([v_url])
+        return True
+    except:
+        if rt >= 5:
+            return False
+        download_audio(v_url, f_index, rt=rt+1)
 
 async def renew_playback():
     global playback_timestamp
@@ -245,9 +282,10 @@ async def play(message):
         voice_channel = message.author.voice.channel
         voice_client = await voice_channel.connect()
 
-    audio_queue.append({"search_term" : " ".join(message.content.split()[1:]), "f_index" : None})
-    await message.channel.send("Track added to queue")
+    search_term = " ".join(message.content.split()[1:])
 
+    await add_to_queue(search_term)
+    await message.channel.send("Track added to queue")
     await handle_cache()
     
     if not playback_inprogress:
