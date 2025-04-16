@@ -7,6 +7,8 @@ import os
 import time
 import datetime
 import math
+import multiprocessing as mp
+import concurrent.futures
 from yt_dlp import YoutubeDL
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -47,7 +49,7 @@ def require_vc(func):
     global voice_client
 
     async def wrapper(*args, **kwargs):
-        while voice_client == None:
+        while voice_client == None or not voice_client.is_connected():
             await asyncio.sleep(0.5)
             print(f"{func.__name__}: Waiting for VC")
         return await func(*args, **kwargs)
@@ -80,15 +82,21 @@ async def handle_cache():
     if(cache_height < cache_limit):
         uncached = [q_e for q_e in audio_queue if q_e["f_index"] == None]
         if len(uncached) > 0:
-            queue_entry = uncached[0]
+            for i in range (0, cache_limit - cache_height):
+                if i >= len(uncached):
+                    return
 
-            f_index = f_id % cache_limit
-            await download_audio(queue_entry["search_term"], f_index)
-            queue_entry["f_index"] = f_index
-            f_id += 1
-            cache_height += 1
+                queue_entry = uncached[i]
 
+                f_index = f_id % cache_limit
+                queue_entry["f_index"] = f_index
+                f_id += 1
+                cache_height += 1
 
+                with concurrent.futures.ProcessPoolExecutor() as exc:
+                    await loop.run_in_executor(exc, download_audio, queue_entry["search_term"], f_index)
+
+@require_vc
 async def change_voicechannel(channel):
     global voice_client
     global channel_change
@@ -97,6 +105,8 @@ async def change_voicechannel(channel):
     channel_change = True
 
     await voice_client.disconnect()
+    while voice_client.is_connected():
+        await asyncio.sleep(0.5)
     client.voice_clients.clear()
     del voice_client
     voice_client = None
@@ -114,6 +124,7 @@ def play_next(err):
         cache_height -= 1
         audio_queue.pop(0)
         if len(audio_queue) > 0:
+            asyncio.run_coroutine_threadsafe(handle_cache(), loop)
             asyncio.run_coroutine_threadsafe(play_yt(), loop)
 
 
@@ -126,8 +137,6 @@ async def play_yt(timestamp=0.0):
     global audio_queue
     global yt_base_url
 
-    await handle_cache()
-
     audio_source = await discord.FFmpegOpusAudio.from_probe(f"tmp_{audio_queue[0]['f_index']}.webm", before_options=f"-ss {fstamp_to_str(timestamp)}")
     playback_timestamp = time.time()
     playback_offset = timestamp
@@ -137,14 +146,13 @@ async def play_yt(timestamp=0.0):
     voice_client.play(audio_source, after=play_next)
 
     
-async def download_audio(search_term, f_index):
+def download_audio(search_term, f_index):
     global yt_base_url
     ctx = {
         "outtmpl" : f"tmp_{f_index}.webm",
         "overwrites" : True,
         "http_chunk_size" : 10000000
     }
-
     with YoutubeDL(ctx) as yt_dl:
         if yt_base_url.match(search_term) != None:
             print(f"Download from url")
@@ -189,9 +197,16 @@ async def on_voice_state_update(member, before, after):
     global followed_user
 
     if member.id == client.user.id and playback_inprogress:
-        if before.channel == None:
+        if after.channel != None:
+
+            if after.channel != before.channel and before.channel != None:
+                print(f"B:{before.channel} A:{after.channel}")
+                await asyncio.sleep(1.0)
+                await change_voicechannel(after.channel)
+            
             channel_change = False
             await renew_playback()
+
     elif followed_user == member.id:
         if after.channel != None:
             await asyncio.sleep(0.5)
@@ -210,7 +225,7 @@ async def hello(message):
 async def queue(message):
     global audio_queue
 
-    await message.channel.send("\n".join([q_e["search_term"] for q_e in audio_queue]))
+    await message.channel.send("Queue:\n" + "\n".join([f"{q_i + 1}. {q_e['search_term']}" for q_i, q_e in enumerate(audio_queue)]))
 
 
 @cmd
@@ -231,12 +246,12 @@ async def play(message):
         voice_client = await voice_channel.connect()
 
     audio_queue.append({"search_term" : " ".join(message.content.split()[1:]), "f_index" : None})
+    await message.channel.send("Track added to queue")
+
     await handle_cache()
     
     if not playback_inprogress:
         await play_yt()
-    else:
-        await message.channel.send("Track added to queue")
 
 
 @cmd
@@ -260,11 +275,11 @@ async def follow(message):
     followed_user = message.author.id
     await message.channel.send(f"Following {message.author.display_name}")
 
+if __name__ == "__main__":
+    with open("./token", "r") as t_f:
+        token = t_f.read()
+        loop.create_task(client.start(token))
 
-with open("./token", "r") as t_f:
-    token = t_f.read()
-    loop.create_task(client.start(token))
 
-
-loop.run_forever()
-loop.close()
+    loop.run_forever()
+    loop.close()
