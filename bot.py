@@ -87,7 +87,8 @@ def get_video_url(url):
     global yt_base_url
 
     ctx = {
-        "http_chunk_size" : 10485760
+        "http_chunk_size" : 10485760,
+        "cookiefile" : "./cookies.txt"
     }
 
     with YoutubeDL(ctx) as yt_dl:
@@ -188,6 +189,7 @@ async def play_yt(timestamp=0.0):
 
     
 def download_audio(v_url, f_index, rt=0):
+    print("Download started")
     ctx = {
         "outtmpl" : f"tmp_{f_index}.webm",
         "overwrites" : True,
