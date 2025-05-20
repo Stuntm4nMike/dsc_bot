@@ -193,7 +193,8 @@ def download_audio(v_url, f_index, rt=0):
     ctx = {
         "outtmpl" : f"tmp_{f_index}.webm",
         "overwrites" : True,
-        "http_chunk_size" : 10485760
+        "http_chunk_size" : 10485760,
+        "cookiefile" : "./cookies.txt"
     }
     try:
         with YoutubeDL(ctx) as yt_dl:
